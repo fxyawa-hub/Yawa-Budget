@@ -1,5 +1,4 @@
 # Yawa-Budget
-
 An AI-powered personal finance tracker built as my NIIT Semester 4 final project.
 
 Problem
