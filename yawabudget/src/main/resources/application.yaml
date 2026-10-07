@@ -1,0 +1,12 @@
+spring:
+  application:
+    name: yawa-budget
+  data:
+    mongodb:
+      uri: ${MONGO_URI:mongodb://localhost:27017/yawa_budget}
+ai:
+  llm:
+    api-key: ${LLM_API_KEY}
+jwt:
+  secret: ${JWT_SECRET:a_very_long_secure_default_secret_for_local_dev_only_change_in_prod}
+  expiration: 86400000 # 24 hours
