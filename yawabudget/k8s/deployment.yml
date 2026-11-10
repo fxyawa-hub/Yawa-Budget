@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yawa-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: yawa-backend
+  template:
+    metadata:
+      labels:
+        app: yawa-backend
+    spec:
+      containers:
+      - name: yawa-backend
+        image: yawa-backend:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        env:
+        - name: MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              name: yawa-secrets
+              key: MONGODB_URI
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: yawa-secrets
+              key: JWT_SECRET
+        - name: AI_LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: yawa-secrets
+              key: AI_LLM_API_KEY
+        - name: CORS_ALLOWED_ORIGINS
+          value: "http://localhost:3000"
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 768Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: yawa-backend-service
+spec:
+  selector:
+    app: yawa-backend
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: NodePort
