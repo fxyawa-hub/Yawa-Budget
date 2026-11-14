@@ -9,10 +9,13 @@ import {
   LogOut,
   Sun,
   Moon,
+  Loader2,
+  ArrowLeftRight,
 } from "lucide-react";
 import { motion } from "motion/react";
 import { useAuth } from "../../context/AuthContext";
 import { useTheme } from "../../context/ThemeContext";
+import { useServerWakeStatus, SERVER_WAKING_MESSAGE, IS_DEMO_MODE } from "../../api";
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -23,6 +26,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const navigate = useNavigate();
+  const isWaking = useServerWakeStatus();
 
   const handleLogout = () => {
     logout();
@@ -33,6 +37,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
     { label: "Dashboard", shortLabel: "Dashboard", to: "/dashboard", icon: LayoutDashboard },
     { label: "Transactions", shortLabel: "Transactions", to: "/transactions", icon: Receipt },
     { label: "Budgets", shortLabel: "Budgets", to: "/budgets", icon: PieChart },
+    ...(IS_DEMO_MODE
+      ? [{ label: "Transfers", shortLabel: "Transfers", to: "/transfers", icon: ArrowLeftRight }]
+      : []),
     { label: "Ask Yawa Budget", shortLabel: "Ask", to: "/ask", icon: MessageSquare },
     { label: "Settings", shortLabel: "Settings", to: "/settings", icon: Settings },
   ];
@@ -120,6 +127,21 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
         </div>
       </header>
 
+      {/* Server wake-up status banner for cold starts */}
+      {isWaking && (
+        <div
+          id="server-waking-banner"
+          className="bg-[var(--bg-surface)] border-b border-[var(--border-color)] px-4 py-2 text-xs font-mono text-[var(--text-secondary)]"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="max-w-6xl mx-auto flex items-center gap-2">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--text-primary)] shrink-0" />
+            <span>{SERVER_WAKING_MESSAGE}</span>
+          </div>
+        </div>
+      )}
+
       {/* Main Content with Route Change Transition (opacity + 2px translate, <250ms) */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-24 md:pb-10">
         <motion.div
@@ -144,7 +166,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
             <NavLink
               key={item.to}
               to={item.to}
-              className={`relative z-10 flex flex-col items-center justify-center py-1 px-3 min-w-[56px] text-center rounded-sm select-none transition-colors ${
+              className={`relative z-10 flex flex-col items-center justify-center py-1 px-2 min-w-[48px] text-center rounded-sm select-none transition-colors ${
                 isActive
                   ? "text-[var(--accent-lime-text)] font-semibold"
                   : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"

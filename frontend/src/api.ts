@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import {
   AuthResponse,
@@ -6,6 +7,7 @@ import {
   Transaction,
   CreateTransactionPayload,
   Budget,
+  BudgetSummaryCategory,
   BudgetSummaryResponse,
   SetBudgetPayload,
   CategorizePayload,
@@ -17,26 +19,108 @@ import {
   PaystackTransferPayload,
   PaystackTransferResult,
   User,
+  BackendAuthResponse,
+  BackendTransactionResponse,
+  BackendBudgetSummaryItem,
+  BackendCategorizeResponse,
+  BackendAskResponse,
 } from "./types";
 
 // ---------------------------------------------------------------------------
 // Environment & Configuration
 // ---------------------------------------------------------------------------
-export const API_BASE_URL: string =
+const rawBaseUrl =
   (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_BASE_URL || "/api";
+export const API_BASE_URL: string = rawBaseUrl.replace(/\/+$/, "") || "/api";
 
-// VITE_DEMO_MODE: Defaults to true when missing or set to "true".
-// When "false", calls the real backend at VITE_API_BASE_URL.
+// VITE_DEMO_MODE: When "true", uses sample data in browser storage.
+// Otherwise ("false" or missing), calls the real Spring Boot backend at VITE_API_BASE_URL.
 const rawDemoEnv = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_DEMO_MODE;
 export const IS_DEMO_MODE: boolean =
-  rawDemoEnv === undefined || rawDemoEnv === "" || rawDemoEnv.toLowerCase() === "true";
+  typeof rawDemoEnv === "string" && rawDemoEnv.trim().toLowerCase() === "true";
 
 export const TOKEN_STORAGE_KEY = "yawabudget_jwt";
 export const USER_STORAGE_KEY = "yawabudget_user";
 
+// Exact categories supported by the Spring Boot backend
+export const BACKEND_CATEGORIES = [
+  "Food",
+  "Transport",
+  "Bills",
+  "Shopping",
+  "Entertainment",
+  "Other",
+];
+
 // Local storage keys for Demo Mode browser persistence
 const DEMO_TX_STORAGE_KEY = "yawabudget_demo_transactions";
 const DEMO_BUDGET_STORAGE_KEY = "yawabudget_demo_budgets";
+
+// ---------------------------------------------------------------------------
+// Free-Host Wake-Up Status Tracking ("Waking up the server, this can take a minute")
+// ---------------------------------------------------------------------------
+export const SERVER_WAKING_MESSAGE = "Waking up the server, this can take a minute";
+
+let activeRequests = 0;
+let wakingTimer: ReturnType<typeof setTimeout> | null = null;
+let isServerWaking = false;
+const wakingListeners = new Set<(waking: boolean) => void>();
+
+function notifyWakingListeners(value: boolean) {
+  isServerWaking = value;
+  wakingListeners.forEach((listener) => {
+    try {
+      listener(value);
+    } catch {
+      // Ignore subscriber errors
+    }
+  });
+}
+
+function trackRequestStart() {
+  if (IS_DEMO_MODE) return;
+  activeRequests += 1;
+  if (!wakingTimer && !isServerWaking) {
+    wakingTimer = setTimeout(() => {
+      if (activeRequests > 0) {
+        notifyWakingListeners(true);
+      }
+    }, 1500);
+  }
+}
+
+function trackRequestEnd() {
+  if (IS_DEMO_MODE) return;
+  activeRequests = Math.max(0, activeRequests - 1);
+  if (activeRequests === 0) {
+    if (wakingTimer) {
+      clearTimeout(wakingTimer);
+      wakingTimer = null;
+    }
+    if (isServerWaking) {
+      notifyWakingListeners(false);
+    }
+  }
+}
+
+export function subscribeServerWaking(listener: (waking: boolean) => void): () => void {
+  wakingListeners.add(listener);
+  listener(isServerWaking);
+  return () => {
+    wakingListeners.delete(listener);
+  };
+}
+
+export function useServerWakeStatus(): boolean {
+  const [waking, setWaking] = useState<boolean>(isServerWaking);
+
+  useEffect(() => {
+    if (IS_DEMO_MODE) return;
+    return subscribeServerWaking(setWaking);
+  }, []);
+
+  return waking;
+}
 
 // ---------------------------------------------------------------------------
 // Axios Client Setup (Used when IS_DEMO_MODE is false)
@@ -46,26 +130,61 @@ export const apiClient = axios.create({
   headers: {
     "Content-Type": "application/json",
   },
-  timeout: 15000,
+  timeout: 120000, // 120 seconds for sleeping free host cold starts
 });
 
-// Request Interceptor: Attach JWT bearer token to every request
+function isAuthPublicEndpoint(url?: string): boolean {
+  if (!url) return false;
+  const cleanUrl = url.split("?")[0];
+  return cleanUrl.endsWith("/auth/login") || cleanUrl.endsWith("/auth/register");
+}
+
+// Request Interceptor: Attach JWT bearer token on every request EXCEPT login & register
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
-    const token = localStorage.getItem(TOKEN_STORAGE_KEY);
-    if (token && config.headers) {
-      config.headers.Authorization = `Bearer ${token}`;
+    trackRequestStart();
+    if (!isAuthPublicEndpoint(config.url)) {
+      const token = localStorage.getItem(TOKEN_STORAGE_KEY);
+      if (token && config.headers) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
+    } else if (config.headers && "Authorization" in config.headers) {
+      delete config.headers.Authorization;
     }
     return config;
   },
-  (error) => Promise.reject(error)
+  (error) => {
+    trackRequestEnd();
+    return Promise.reject(error);
+  }
 );
 
-// Response Interceptor: Handle 401 Unauthorized globally
+interface RetriableRequestConfig extends InternalAxiosRequestConfig {
+  _retried?: boolean;
+}
+
+// Response Interceptor: Retry once on network error, and clear token on 401/403 for protected calls
 apiClient.interceptors.response.use(
-  (response) => response,
-  (error: AxiosError<{ error?: string; message?: string }>) => {
-    if (error.response?.status === 401) {
+  (response) => {
+    trackRequestEnd();
+    return response;
+  },
+  async (error: AxiosError<{ error?: string; message?: string }>) => {
+    trackRequestEnd();
+    const originalRequest = error.config as RetriableRequestConfig | undefined;
+
+    // Retry once on a network error (no HTTP response received, not cancelled, not already timed out)
+    const isNetworkError =
+      !error.response && !axios.isCancel(error) && error.code !== "ECONNABORTED";
+    if (isNetworkError && originalRequest && !originalRequest._retried) {
+      originalRequest._retried = true;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      return apiClient(originalRequest);
+    }
+
+    // On 401 or 403 from a protected call, clear token and redirect to Login
+    const status = error.response?.status;
+    if ((status === 401 || status === 403) && !isAuthPublicEndpoint(originalRequest?.url)) {
       localStorage.removeItem(TOKEN_STORAGE_KEY);
       localStorage.removeItem(USER_STORAGE_KEY);
 
@@ -76,38 +195,93 @@ apiClient.interceptors.response.use(
         window.location.href = "/login?sessionExpired=true";
       }
     }
+
     return Promise.reject(error);
   }
 );
 
-// Helper to extract clean error message (never shows a blank screen on backend failure)
+// Helper to extract a clean plain-sentence error message
+function ensureSentence(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
 export function getErrorMessage(
   error: unknown,
-  fallback: string = "An unexpected error occurred"
+  fallback: string = "An unexpected error occurred. Please try again."
 ): string {
   if (axios.isAxiosError(error)) {
-    const data = error.response?.data;
-    if (typeof data === "string") return data;
+    const data = error.response?.data as
+      | string
+      | { error?: string; message?: string; fieldErrors?: Record<string, string> }
+      | undefined;
+
+    if (typeof data === "string" && data.trim()) {
+      return ensureSentence(data);
+    }
+
     if (data && typeof data === "object") {
-      if ("error" in data && typeof data.error === "string") return data.error;
-      if ("message" in data && typeof data.message === "string") return data.message;
+      if (data.fieldErrors && typeof data.fieldErrors === "object") {
+        const firstFieldMsg = Object.values(data.fieldErrors).find(
+          (val) => typeof val === "string" && val.trim().length > 0
+        );
+        if (firstFieldMsg) {
+          return ensureSentence(firstFieldMsg);
+        }
+      }
+
+      if (typeof data.message === "string" && data.message.trim()) {
+        return ensureSentence(data.message);
+      }
+
+      if (typeof data.error === "string" && data.error.trim()) {
+        return ensureSentence(data.error);
+      }
+    }
+
+    if (error.code === "ECONNABORTED" || error.message?.toLowerCase().includes("timeout")) {
+      return "The server took too long to respond. Please try again.";
     }
     if (
+      !error.response ||
       error.message?.includes("Network Error") ||
       error.code === "ERR_NETWORK" ||
       error.code === "ECONNREFUSED"
     ) {
-      return `Backend server unreachable at ${API_BASE_URL}. Please check that your server is running.`;
+      return "Could not reach the server. Please check your connection and try again.";
     }
     if (error.message) {
-      return error.message;
+      return ensureSentence(error.message);
     }
   }
-  if (error instanceof Error) {
-    return error.message;
+  if (error instanceof Error && error.message) {
+    return ensureSentence(error.message);
   }
   return fallback;
 }
+
+// ---------------------------------------------------------------------------
+// Date Helpers
+// ---------------------------------------------------------------------------
+const getCurrentMonthStr = (): string => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  return `${year}-${month}`;
+};
+
+export const getCurrentMonthDateRange = (): { start: string; end: string } => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const monthIndex = now.getMonth();
+  const monthStr = String(monthIndex + 1).padStart(2, "0");
+  const lastDay = new Date(year, monthIndex + 1, 0).getDate();
+  return {
+    start: `${year}-${monthStr}-01`,
+    end: `${year}-${monthStr}-${String(lastDay).padStart(2, "0")}`,
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Browser Demo Mode Store & Realistic Seed Generators
@@ -119,13 +293,6 @@ const DEMO_USER: User = {
 };
 
 const DEMO_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.demo_mode_jwt_token_for_yawabudget_frontend";
-
-const getCurrentMonthStr = () => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  return `${year}-${month}`;
-};
 
 function initDemoBudgets(): Budget[] {
   const currentMonth = getCurrentMonthStr();
@@ -143,21 +310,21 @@ function initDemoBudgets(): Budget[] {
 function initDemoTransactions(): Transaction[] {
   const currentMonth = getCurrentMonthStr();
   return [
-    { id: "t1", userId: DEMO_USER.id, amount: 150000, description: "Monthly Apartment Rent", date: `${currentMonth}-01`, category: "Housing & Rent", createdAt: new Date().toISOString() },
-    { id: "t2", userId: DEMO_USER.id, amount: 28500, description: "Shoprite Supermarket Groceries", date: `${currentMonth}-03`, category: "Groceries", createdAt: new Date().toISOString() },
-    { id: "t3", userId: DEMO_USER.id, amount: 18200, description: "Spar Pantry Restock & Provisions", date: `${currentMonth}-07`, category: "Groceries", createdAt: new Date().toISOString() },
-    { id: "t4", userId: DEMO_USER.id, amount: 15000, description: "Mile 12 Fresh Produce", date: `${currentMonth}-11`, category: "Groceries", createdAt: new Date().toISOString() },
-    { id: "t5", userId: DEMO_USER.id, amount: 3500, description: "Mama Put Canteen Lunch", date: `${currentMonth}-04`, category: "Dining Out", createdAt: new Date().toISOString() },
-    { id: "t6", userId: DEMO_USER.id, amount: 8500, description: "KFC Fast Food Meal", date: `${currentMonth}-08`, category: "Dining Out", createdAt: new Date().toISOString() },
-    { id: "t7", userId: DEMO_USER.id, amount: 6000, description: "Suya Spot & Drinks with Friends", date: `${currentMonth}-12`, category: "Dining Out", createdAt: new Date().toISOString() },
-    { id: "t8", userId: DEMO_USER.id, amount: 4200, description: "Bolt ride to campus", date: `${currentMonth}-02`, category: "Transportation", createdAt: new Date().toISOString() },
-    { id: "t9", userId: DEMO_USER.id, amount: 1500, description: "Danfo & BRT transit fare", date: `${currentMonth}-06`, category: "Transportation", createdAt: new Date().toISOString() },
-    { id: "t10", userId: DEMO_USER.id, amount: 18000, description: "TotalEnergies Fuel Refill", date: `${currentMonth}-09`, category: "Transportation", createdAt: new Date().toISOString() },
-    { id: "t11", userId: DEMO_USER.id, amount: 15000, description: "MTN 5G Data & Airtime bundle", date: `${currentMonth}-05`, category: "Utilities", createdAt: new Date().toISOString() },
-    { id: "t12", userId: DEMO_USER.id, amount: 20000, description: "EKEDC Prepaid Electricity Token", date: `${currentMonth}-07`, category: "Utilities", createdAt: new Date().toISOString() },
-    { id: "t13", userId: DEMO_USER.id, amount: 14000, description: "DStv Monthly Subscription", date: `${currentMonth}-10`, category: "Utilities", createdAt: new Date().toISOString() },
-    { id: "t14", userId: DEMO_USER.id, amount: 9000, description: "Filmhouse IMAX Cinema tickets", date: `${currentMonth}-08`, category: "Entertainment", createdAt: new Date().toISOString() },
-    { id: "t15", userId: DEMO_USER.id, amount: 22000, description: "Jumia online order", date: `${currentMonth}-11`, category: "Shopping", createdAt: new Date().toISOString() },
+    { id: "t1", userId: DEMO_USER.id, amount: 150000, description: "Monthly Apartment Rent", date: `${currentMonth}-01`, category: "Housing & Rent", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t2", userId: DEMO_USER.id, amount: 28500, description: "Shoprite Supermarket Groceries", date: `${currentMonth}-03`, category: "Groceries", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t3", userId: DEMO_USER.id, amount: 18200, description: "Spar Pantry Restock & Provisions", date: `${currentMonth}-07`, category: "Groceries", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t4", userId: DEMO_USER.id, amount: 15000, description: "Mile 12 Fresh Produce", date: `${currentMonth}-11`, category: "Groceries", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t5", userId: DEMO_USER.id, amount: 3500, description: "Mama Put Canteen Lunch", date: `${currentMonth}-04`, category: "Dining Out", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t6", userId: DEMO_USER.id, amount: 8500, description: "KFC Fast Food Meal", date: `${currentMonth}-08`, category: "Dining Out", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t7", userId: DEMO_USER.id, amount: 6000, description: "Suya Spot & Drinks with Friends", date: `${currentMonth}-12`, category: "Dining Out", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t8", userId: DEMO_USER.id, amount: 4200, description: "Bolt ride to campus", date: `${currentMonth}-02`, category: "Transportation", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t9", userId: DEMO_USER.id, amount: 1500, description: "Danfo & BRT transit fare", date: `${currentMonth}-06`, category: "Transportation", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t10", userId: DEMO_USER.id, amount: 18000, description: "TotalEnergies Fuel Refill", date: `${currentMonth}-09`, category: "Transportation", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t11", userId: DEMO_USER.id, amount: 15000, description: "MTN 5G Data & Airtime bundle", date: `${currentMonth}-05`, category: "Utilities", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t12", userId: DEMO_USER.id, amount: 20000, description: "EKEDC Prepaid Electricity Token", date: `${currentMonth}-07`, category: "Utilities", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t13", userId: DEMO_USER.id, amount: 14000, description: "DStv Monthly Subscription", date: `${currentMonth}-10`, category: "Utilities", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t14", userId: DEMO_USER.id, amount: 9000, description: "Filmhouse IMAX Cinema tickets", date: `${currentMonth}-08`, category: "Entertainment", type: "EXPENSE", createdAt: new Date().toISOString() },
+    { id: "t15", userId: DEMO_USER.id, amount: 22000, description: "Jumia online order", date: `${currentMonth}-11`, category: "Shopping", type: "EXPENSE", createdAt: new Date().toISOString() },
   ];
 }
 
@@ -169,7 +336,8 @@ function getStoredDemoTransactions(): Transaction[] {
     return initial;
   }
   try {
-    return JSON.parse(raw) as Transaction[];
+    const parsed = JSON.parse(raw) as Transaction[];
+    return parsed.map((t) => ({ ...t, type: t.type || "EXPENSE" }));
   } catch {
     return initDemoTransactions();
   }
@@ -217,8 +385,19 @@ export async function loginApi(payload: LoginPayload): Promise<AuthResponse> {
     };
   }
 
-  const response = await apiClient.post<AuthResponse>("/auth/login", payload);
-  return response.data;
+  const response = await apiClient.post<BackendAuthResponse>("/auth/login", {
+    email: payload.email.trim(),
+    password: payload.password,
+  });
+  const data = response.data;
+  return {
+    token: data.token,
+    user: {
+      id: data.userId,
+      name: data.name,
+      email: payload.email.trim(),
+    },
+  };
 }
 
 export async function registerApi(payload: RegisterPayload): Promise<AuthResponse> {
@@ -235,8 +414,20 @@ export async function registerApi(payload: RegisterPayload): Promise<AuthRespons
     };
   }
 
-  const response = await apiClient.post<AuthResponse>("/auth/register", payload);
-  return response.data;
+  const response = await apiClient.post<BackendAuthResponse>("/auth/register", {
+    name: payload.name.trim(),
+    email: payload.email.trim(),
+    password: payload.password,
+  });
+  const data = response.data;
+  return {
+    token: data.token,
+    user: {
+      id: data.userId,
+      name: data.name,
+      email: payload.email.trim(),
+    },
+  };
 }
 
 export async function deleteAccountApi(): Promise<{ message: string; success?: boolean }> {
@@ -248,13 +439,24 @@ export async function deleteAccountApi(): Promise<{ message: string; success?: b
     return { message: "Demo account and storage successfully reset.", success: true };
   }
 
-  const response = await apiClient.delete<{ message: string; success?: boolean }>("/auth/account");
-  return response.data;
+  await apiClient.delete("/auth/account");
+  return { message: "Account deleted successfully.", success: true };
 }
 
 // ---------------------------------------------------------------------------
 // 2. Transaction Endpoints
 // ---------------------------------------------------------------------------
+function mapBackendTransaction(tx: BackendTransactionResponse): Transaction {
+  return {
+    id: tx.id,
+    amount: Number(tx.amount),
+    description: tx.description,
+    category: tx.categoryName || "Other",
+    date: tx.date,
+    type: tx.type === "INCOME" ? "INCOME" : "EXPENSE",
+  };
+}
+
 export async function getTransactionsApi(
   startDate?: string,
   endDate?: string
@@ -270,11 +472,14 @@ export async function getTransactionsApi(
     return txs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }
 
-  const params: Record<string, string> = {};
-  if (startDate) params.startDate = startDate;
-  if (endDate) params.endDate = endDate;
-  const response = await apiClient.get<Transaction[]>("/transactions", { params });
-  return response.data;
+  const defaults = getCurrentMonthDateRange();
+  const params = {
+    start: startDate || defaults.start,
+    end: endDate || defaults.end,
+  };
+  const response = await apiClient.get<BackendTransactionResponse[]>("/transactions", { params });
+  const mapped = (response.data || []).map(mapBackendTransaction);
+  return mapped.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 }
 
 export async function createTransactionApi(
@@ -294,6 +499,7 @@ export async function createTransactionApi(
       description: payload.description.trim(),
       date: payload.date || new Date().toISOString().split("T")[0],
       category,
+      type: payload.type || "EXPENSE",
       createdAt: new Date().toISOString(),
     };
 
@@ -303,8 +509,25 @@ export async function createTransactionApi(
     return newTx;
   }
 
-  const response = await apiClient.post<Transaction>("/transactions", payload);
-  return response.data;
+  const body: {
+    amount: number;
+    description: string;
+    categoryName?: string;
+    date: string;
+    type: "INCOME" | "EXPENSE";
+  } = {
+    amount: Number(payload.amount),
+    description: payload.description.trim(),
+    date: payload.date,
+    type: payload.type || "EXPENSE",
+  };
+
+  if (payload.category && payload.category.trim()) {
+    body.categoryName = payload.category.trim();
+  }
+
+  const response = await apiClient.post<BackendTransactionResponse>("/transactions", body);
+  return mapBackendTransaction(response.data);
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +537,12 @@ export async function getBudgetSummaryApi(): Promise<BudgetSummaryResponse> {
   if (IS_DEMO_MODE) {
     const currentMonth = getCurrentMonthStr();
     const budgets = getStoredDemoBudgets();
-    const transactions = getStoredDemoTransactions().filter((t) => t.date.startsWith(currentMonth));
+    const transactions = getStoredDemoTransactions().filter(
+      (t) => t.date.startsWith(currentMonth) && t.type !== "INCOME"
+    );
+    const totalIncome = getStoredDemoTransactions()
+      .filter((t) => t.date.startsWith(currentMonth) && t.type === "INCOME")
+      .reduce((sum, t) => sum + t.amount, 0);
 
     const spendingByCategory: Record<string, number> = {};
     let totalSpent = 0;
@@ -324,7 +552,7 @@ export async function getBudgetSummaryApi(): Promise<BudgetSummaryResponse> {
     });
 
     let totalBudget = 0;
-    const categoriesSummary = budgets.map((b) => {
+    const categoriesSummary: BudgetSummaryCategory[] = budgets.map((b) => {
       const spent = spendingByCategory[b.category] || 0;
       const budgeted = b.monthlyLimit;
       totalBudget += budgeted;
@@ -341,7 +569,6 @@ export async function getBudgetSummaryApi(): Promise<BudgetSummaryResponse> {
       };
     });
 
-    // Categories with spending but no explicit budget
     const budgetedNames = new Set(budgets.map((b) => b.category));
     Object.keys(spendingByCategory).forEach((cat) => {
       if (!budgetedNames.has(cat)) {
@@ -365,13 +592,89 @@ export async function getBudgetSummaryApi(): Promise<BudgetSummaryResponse> {
       totalBudget: Number(totalBudget.toFixed(2)),
       totalSpent: Number(totalSpent.toFixed(2)),
       totalRemaining: Number((totalBudget - totalSpent).toFixed(2)),
+      totalIncome: Number(totalIncome.toFixed(2)),
       overallPercentage: totalBudget > 0 ? Math.round((totalSpent / totalBudget) * 100) : 0,
       categories: categoriesSummary,
     };
   }
 
-  const response = await apiClient.get<BudgetSummaryResponse>("/budgets/summary");
-  return response.data;
+  // Real Spring Boot backend: derive dashboard totals from both /budgets/summary and /transactions
+  const currentMonth = getCurrentMonthStr();
+  const { start, end } = getCurrentMonthDateRange();
+
+  const [summaryRes, transactions] = await Promise.all([
+    apiClient.get<BackendBudgetSummaryItem[]>("/budgets/summary"),
+    getTransactionsApi(start, end),
+  ]);
+
+  const summaryItems = Array.isArray(summaryRes.data) ? summaryRes.data : [];
+
+  const expenseTxs = transactions.filter((tx) => tx.type !== "INCOME");
+  const totalIncome = transactions
+    .filter((tx) => tx.type === "INCOME")
+    .reduce((sum, tx) => sum + tx.amount, 0);
+
+  const spendingByCategory: Record<string, number> = {};
+  let txTotalSpent = 0;
+  expenseTxs.forEach((tx) => {
+    const cat = tx.category || "Other";
+    spendingByCategory[cat] = (spendingByCategory[cat] || 0) + tx.amount;
+    txTotalSpent += tx.amount;
+  });
+
+  let totalBudget = 0;
+  const seenCategories = new Set<string>();
+
+  const categoriesSummary: BudgetSummaryCategory[] = summaryItems.map((item) => {
+    const categoryName = item.categoryName || "Other";
+    seenCategories.add(categoryName);
+    const limit = Number(item.limit) || 0;
+    const spent = Number(item.spent) || 0;
+    totalBudget += limit;
+    const remaining = limit - spent;
+    const percentage = limit > 0 ? Math.round((spent / limit) * 100) : 0;
+
+    return {
+      category: categoryName,
+      budgeted: limit,
+      spent: Number(spent.toFixed(2)),
+      remaining: Number(remaining.toFixed(2)),
+      percentage,
+      isOverLimit: limit > 0 ? spent > limit : false,
+      isWarning: Boolean(item.isNearingLimit),
+    };
+  });
+
+  // Include expense transactions whose categories aren't yet in /budgets/summary
+  Object.keys(spendingByCategory).forEach((cat) => {
+    if (!seenCategories.has(cat)) {
+      const spent = spendingByCategory[cat];
+      categoriesSummary.push({
+        category: cat,
+        budgeted: 0,
+        spent: Number(spent.toFixed(2)),
+        remaining: -Number(spent.toFixed(2)),
+        percentage: 0,
+        isOverLimit: false,
+        isWarning: false,
+      });
+    }
+  });
+
+  const summaryTotalSpent = summaryItems.reduce((sum, item) => sum + (Number(item.spent) || 0), 0);
+  const totalSpent = expenseTxs.length > 0 ? txTotalSpent : summaryTotalSpent;
+
+  categoriesSummary.sort((a, b) => b.spent - a.spent);
+
+  return {
+    month: currentMonth,
+    totalBudget: Number(totalBudget.toFixed(2)),
+    totalSpent: Number(totalSpent.toFixed(2)),
+    totalRemaining: Number((totalBudget - totalSpent).toFixed(2)),
+    totalIncome: Number(totalIncome.toFixed(2)),
+    overallPercentage: totalBudget > 0 ? Math.round((totalSpent / totalBudget) * 100) : 0,
+    categories: categoriesSummary,
+  };
 }
 
 export async function getBudgetsApi(): Promise<Budget[]> {
@@ -379,8 +682,19 @@ export async function getBudgetsApi(): Promise<Budget[]> {
     return getStoredDemoBudgets();
   }
 
-  const response = await apiClient.get<Budget[]>("/budgets");
-  return response.data;
+  // Backend contract exposes GET /budgets/summary (no GET /budgets), so derive configured budgets from it
+  const currentMonth = getCurrentMonthStr();
+  const response = await apiClient.get<BackendBudgetSummaryItem[]>("/budgets/summary");
+  const items = Array.isArray(response.data) ? response.data : [];
+
+  return items
+    .filter((item) => Number(item.limit) > 0)
+    .map((item) => ({
+      id: item.categoryName,
+      category: item.categoryName,
+      monthlyLimit: Number(item.limit),
+      month: currentMonth,
+    }));
 }
 
 export async function setBudgetApi(payload: SetBudgetPayload): Promise<Budget> {
@@ -410,8 +724,22 @@ export async function setBudgetApi(payload: SetBudgetPayload): Promise<Budget> {
     return updatedBudget;
   }
 
-  const response = await apiClient.post<Budget>("/budgets", payload);
-  return response.data;
+  const categoryName = payload.category.trim();
+  const monthlyLimit = Number(payload.monthlyLimit);
+
+  // POST /budgets returns an empty response
+  await apiClient.post("/budgets", {
+    categoryName,
+    monthlyLimit,
+  });
+
+  return {
+    id: categoryName,
+    category: categoryName,
+    monthlyLimit,
+    month: payload.month || getCurrentMonthStr(),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 export async function updateTransactionCategoryApi(
@@ -429,12 +757,11 @@ export async function updateTransactionCategoryApi(
     throw new Error("Transaction not found");
   }
 
-  const response = await apiClient.patch<Transaction>(`/transactions/${id}`, { category });
-  return response.data;
+  throw new Error("Editing category after creation is not supported by the backend.");
 }
 
 // ---------------------------------------------------------------------------
-// 4. AI Endpoints (Categorization & Natural-Language Q&A)
+// 4. Categorization & Q&A Endpoints
 // ---------------------------------------------------------------------------
 export async function categorizeTransactionApi(
   payload: CategorizePayload
@@ -510,8 +837,12 @@ export async function categorizeTransactionApi(
     };
   }
 
-  const response = await apiClient.post<CategorizeResponse>("/ai/categorize", payload);
-  return response.data;
+  const response = await apiClient.post<BackendCategorizeResponse>("/ai/categorize", {
+    description: payload.description.trim(),
+  });
+  return {
+    suggestedCategory: response.data?.category || "Other",
+  };
 }
 
 export async function askYawaBudgetApi(
@@ -520,11 +851,11 @@ export async function askYawaBudgetApi(
   if (IS_DEMO_MODE) {
     const summary = await getBudgetSummaryApi();
     const transactions = await getTransactionsApi();
+    const expenseTransactions = transactions.filter((t) => t.type !== "INCOME");
     const qLower = payload.question.trim().toLowerCase();
 
     let answer = "";
 
-    // 1. "where can I cut" -> name the top 2 categories by spend and suggest a figure
     if (
       qLower.includes("where can i cut") ||
       qLower.includes("where to cut") ||
@@ -544,25 +875,21 @@ export async function askYawaBudgetApi(
       } else {
         answer = `You don't have enough recorded expenses yet to suggest cuts.`;
       }
-    }
-    // 2. The largest expense
-    else if (
+    } else if (
       qLower.includes("largest") ||
       qLower.includes("highest expense") ||
       qLower.includes("biggest expense") ||
       qLower.includes("most expensive") ||
       qLower.includes("biggest transaction")
     ) {
-      if (transactions.length > 0) {
-        const sortedTxns = [...transactions].sort((a, b) => b.amount - a.amount);
+      if (expenseTransactions.length > 0) {
+        const sortedTxns = [...expenseTransactions].sort((a, b) => b.amount - a.amount);
         const largest = sortedTxns[0];
         answer = `Your largest expense this month was ₦${largest.amount.toLocaleString()} for "${largest.description}" (${largest.category}) on ${largest.date}.`;
       } else {
         answer = `You have no recorded expenses this month.`;
       }
-    }
-    // 3. How much is left to spend
-    else if (
+    } else if (
       qLower.includes("left to spend") ||
       qLower.includes("how much is left") ||
       qLower.includes("how much left") ||
@@ -570,9 +897,7 @@ export async function askYawaBudgetApi(
       qLower.includes("safe to spend")
     ) {
       answer = `You have ₦${summary.totalRemaining.toLocaleString()} left to spend this month out of your ₦${summary.totalBudget.toLocaleString()} total monthly limit.`;
-    }
-    // 4. Which categories are close to or over their limit
-    else if (
+    } else if (
       qLower.includes("close") ||
       qLower.includes("over limit") ||
       qLower.includes("over their limit") ||
@@ -584,21 +909,25 @@ export async function askYawaBudgetApi(
       const warningCats = summary.categories.filter((c) => c.isWarning && !c.isOverLimit);
 
       if (overBudgetCats.length > 0 && warningCats.length > 0) {
-        const overStr = overBudgetCats.map((c) => `${c.category} (spent ₦${c.spent.toLocaleString()} of ₦${c.budgeted.toLocaleString()})`).join(", ");
+        const overStr = overBudgetCats
+          .map((c) => `${c.category} (spent ₦${c.spent.toLocaleString()} of ₦${c.budgeted.toLocaleString()})`)
+          .join(", ");
         const warnStr = warningCats.map((c) => `${c.category} (${c.percentage}%)`).join(", ");
         answer = `You have exceeded your limit in ${overStr}, and you are close to your limit in ${warnStr}.`;
       } else if (overBudgetCats.length > 0) {
-        const overStr = overBudgetCats.map((c) => `${c.category} (spent ₦${c.spent.toLocaleString()} of ₦${c.budgeted.toLocaleString()})`).join(", ");
+        const overStr = overBudgetCats
+          .map((c) => `${c.category} (spent ₦${c.spent.toLocaleString()} of ₦${c.budgeted.toLocaleString()})`)
+          .join(", ");
         answer = `You have exceeded your limit in: ${overStr}.`;
       } else if (warningCats.length > 0) {
-        const warnStr = warningCats.map((c) => `${c.category} (spent ₦${c.spent.toLocaleString()} of ₦${c.budgeted.toLocaleString()}, ${c.percentage}%)`).join(", ");
+        const warnStr = warningCats
+          .map((c) => `${c.category} (spent ₦${c.spent.toLocaleString()} of ₦${c.budgeted.toLocaleString()}, ${c.percentage}%)`)
+          .join(", ");
         answer = `You are close to your limit in: ${warnStr}.`;
       } else {
         answer = `No categories are close to or over their limit. All your spending is currently within budget.`;
       }
-    }
-    // 5. Total spent this month
-    else if (
+    } else if (
       qLower.includes("total spent") ||
       qLower.includes("total spend") ||
       qLower.includes("spent this month") ||
@@ -606,10 +935,8 @@ export async function askYawaBudgetApi(
       qLower.includes("how much did i spend") ||
       qLower === "total"
     ) {
-      answer = `You have spent ₦${summary.totalSpent.toLocaleString()} in total this month across ${transactions.length} recorded expenses.`;
-    }
-    // 6. Spending on a category ("how much did I spend on food", etc.)
-    else if (
+      answer = `You have spent ₦${summary.totalSpent.toLocaleString()} in total this month across ${expenseTransactions.length} recorded expenses.`;
+    } else if (
       qLower.includes("food") ||
       qLower.includes("groceries") ||
       qLower.includes("dining") ||
@@ -630,36 +957,28 @@ export async function askYawaBudgetApi(
         answer = `You have spent ₦${totalFood.toLocaleString()} on food this month: ₦${grocSpent.toLocaleString()} on Groceries and ₦${dinSpent.toLocaleString()} on Dining Out.`;
       } else if (qLower.includes("groceries")) {
         const cat = summary.categories.find((c) => c.category === "Groceries");
-        const spent = cat ? cat.spent : 0;
-        answer = `You have spent ₦${spent.toLocaleString()} on Groceries this month.`;
+        answer = `You have spent ₦${(cat ? cat.spent : 0).toLocaleString()} on Groceries this month.`;
       } else if (qLower.includes("dining")) {
         const cat = summary.categories.find((c) => c.category === "Dining Out");
-        const spent = cat ? cat.spent : 0;
-        answer = `You have spent ₦${spent.toLocaleString()} on Dining Out this month.`;
+        answer = `You have spent ₦${(cat ? cat.spent : 0).toLocaleString()} on Dining Out this month.`;
       } else if (qLower.includes("transport")) {
         const cat = summary.categories.find((c) => c.category === "Transportation");
-        const spent = cat ? cat.spent : 0;
-        answer = `You have spent ₦${spent.toLocaleString()} on Transportation this month.`;
+        answer = `You have spent ₦${(cat ? cat.spent : 0).toLocaleString()} on Transportation this month.`;
       } else if (qLower.includes("utilities") || qLower.includes("bills")) {
         const cat = summary.categories.find((c) => c.category === "Utilities");
-        const spent = cat ? cat.spent : 0;
-        answer = `You have spent ₦${spent.toLocaleString()} on Utilities this month.`;
+        answer = `You have spent ₦${(cat ? cat.spent : 0).toLocaleString()} on Utilities this month.`;
       } else if (qLower.includes("housing") || qLower.includes("rent")) {
         const cat = summary.categories.find((c) => c.category === "Housing & Rent");
-        const spent = cat ? cat.spent : 0;
-        answer = `You have spent ₦${spent.toLocaleString()} on Housing & Rent this month.`;
+        answer = `You have spent ₦${(cat ? cat.spent : 0).toLocaleString()} on Housing & Rent this month.`;
       } else if (qLower.includes("entertainment")) {
         const cat = summary.categories.find((c) => c.category === "Entertainment");
-        const spent = cat ? cat.spent : 0;
-        answer = `You have spent ₦${spent.toLocaleString()} on Entertainment this month.`;
+        answer = `You have spent ₦${(cat ? cat.spent : 0).toLocaleString()} on Entertainment this month.`;
       } else if (qLower.includes("shopping")) {
         const cat = summary.categories.find((c) => c.category === "Shopping");
-        const spent = cat ? cat.spent : 0;
-        answer = `You have spent ₦${spent.toLocaleString()} on Shopping this month.`;
+        answer = `You have spent ₦${(cat ? cat.spent : 0).toLocaleString()} on Shopping this month.`;
       }
     }
 
-    // 7. If question isn't recognised
     if (!answer) {
       answer = `I can answer questions about your spending, limits and categories. Try asking how much you spent on food.`;
     }
@@ -667,76 +986,74 @@ export async function askYawaBudgetApi(
     return { answer };
   }
 
-  const response = await apiClient.post<AskYawaBudgetResponse>("/ai/ask", payload);
-  return response.data;
+  const response = await apiClient.post<BackendAskResponse>("/ai/ask", {
+    question: payload.question,
+  });
+  return {
+    answer: response.data.answer,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// 5. Transfer Endpoints (Optional Transfers feature)
+// 5. Transfer Endpoints (Demo Mode Only - Not present on Spring Boot backend)
 // ---------------------------------------------------------------------------
 export async function getPaystackBanksApi(): Promise<PaystackBank[]> {
-  if (IS_DEMO_MODE) {
-    return [
-      { name: "Guaranty Trust Bank", slug: "guaranty-trust-bank", code: "058", active: true },
-      { name: "Zenith Bank", slug: "zenith-bank", code: "057", active: true },
-      { name: "Access Bank", slug: "access-bank", code: "044", active: true },
-      { name: "Kuda Bank", slug: "kuda-bank", code: "50211", active: true },
-      { name: "First Bank of Nigeria", slug: "first-bank-of-nigeria", code: "011", active: true },
-    ];
+  if (!IS_DEMO_MODE) {
+    throw new Error("Transfers are only available in demo mode.");
   }
 
-  const response = await apiClient.get<PaystackBank[]>("/paystack/banks");
-  return response.data;
+  return [
+    { name: "Guaranty Trust Bank", slug: "guaranty-trust-bank", code: "058", active: true },
+    { name: "Zenith Bank", slug: "zenith-bank", code: "057", active: true },
+    { name: "Access Bank", slug: "access-bank", code: "044", active: true },
+    { name: "Kuda Bank", slug: "kuda-bank", code: "50211", active: true },
+    { name: "First Bank of Nigeria", slug: "first-bank-of-nigeria", code: "011", active: true },
+  ];
 }
 
 export async function resolveAccountApi(
   accountNumber: string,
   bankCode: string
 ): Promise<PaystackResolveResponse> {
-  if (IS_DEMO_MODE) {
-    return {
-      account_number: accountNumber,
-      account_name: "BABAJIDE TUNDE ADEKUNLE",
-      bank_code: bankCode,
-    };
+  if (!IS_DEMO_MODE) {
+    throw new Error("Transfers are only available in demo mode.");
   }
 
-  const response = await apiClient.get<PaystackResolveResponse>("/paystack/resolve", {
-    params: { account_number: accountNumber, bank_code: bankCode },
-  });
-  return response.data;
+  return {
+    account_number: accountNumber,
+    account_name: "BABAJIDE TUNDE ADEKUNLE",
+    bank_code: bankCode,
+  };
 }
 
 export async function sendTransferApi(
   payload: PaystackTransferPayload
 ): Promise<PaystackTransferResult> {
-  if (IS_DEMO_MODE) {
-    return {
-      id: `trf_demo_${Date.now()}`,
-      reference: `TRF_snbx_${Math.random().toString(36).substring(2, 9)}`,
-      status: "success",
-      amount: payload.amount,
-      fee: 25,
-      totalDebited: payload.amount + 25,
-      recipientName: payload.accountName,
-      recipientBank: payload.recipientBankName,
-      accountNumber: payload.accountNumber,
-      narration: payload.narration || "Transfer",
-      date: new Date().toISOString().split("T")[0],
-    };
+  if (!IS_DEMO_MODE) {
+    throw new Error("Transfers are only available in demo mode.");
   }
 
-  const response = await apiClient.post<PaystackTransferResult>("/paystack/transfer", payload);
-  return response.data;
+  return {
+    id: `trf_demo_${Date.now()}`,
+    reference: `TRF_snbx_${Math.random().toString(36).substring(2, 9)}`,
+    status: "success",
+    amount: payload.amount,
+    fee: 25,
+    totalDebited: payload.amount + 25,
+    recipientName: payload.accountName,
+    recipientBank: payload.recipientBankName,
+    accountNumber: payload.accountNumber,
+    narration: payload.narration || "Transfer",
+    date: new Date().toISOString().split("T")[0],
+  };
 }
 
 export async function getTransferHistoryApi(): Promise<PaystackTransferResult[]> {
-  if (IS_DEMO_MODE) {
+  if (!IS_DEMO_MODE) {
     return [];
   }
 
-  const response = await apiClient.get<PaystackTransferResult[]>("/paystack/transfers");
-  return response.data;
+  return [];
 }
 
 export default apiClient;

@@ -17,7 +17,7 @@ export interface LoginPayload {
 export interface RegisterPayload {
   email: string;
   password: string;
-  name?: string;
+  name: string;
 }
 
 export interface BudgetSummaryCategory {
@@ -35,17 +35,18 @@ export interface BudgetSummaryResponse {
   totalBudget: number;
   totalSpent: number;
   totalRemaining: number;
+  totalIncome?: number;
   overallPercentage: number;
   categories: BudgetSummaryCategory[];
 }
 
 export interface Budget {
   id: string;
-  userId: string;
+  userId?: string;
   category: string;
   monthlyLimit: number;
   month: string;
-  updatedAt: string;
+  updatedAt?: string;
 }
 
 export interface SetBudgetPayload {
@@ -54,21 +55,25 @@ export interface SetBudgetPayload {
   month?: string;
 }
 
+export type TransactionType = "INCOME" | "EXPENSE";
+
 export interface Transaction {
   id: string;
-  userId: string;
+  userId?: string;
   amount: number;
   description: string;
   date: string;
   category: string;
-  createdAt: string;
+  type: TransactionType;
+  createdAt?: string;
 }
 
 export interface CreateTransactionPayload {
   amount: number;
   description: string;
   date: string;
-  category: string;
+  category?: string;
+  type: TransactionType;
 }
 
 export interface CategorizePayload {
@@ -98,11 +103,45 @@ export interface ChatMessageItem {
 }
 
 export interface ApiErrorResponse {
-  error: string;
+  error?: string;
+  message?: string;
 }
 
 // -------------------------------------------------------------
-// Paystack Transfer Sandbox Types (Stretch Feature 2)
+// Exact Spring Boot Backend DTO Contracts (internal mapping)
+// -------------------------------------------------------------
+export interface BackendAuthResponse {
+  token: string;
+  userId: string;
+  name: string;
+}
+
+export interface BackendTransactionResponse {
+  id: string;
+  amount: number;
+  description: string;
+  categoryName: string;
+  date: string;
+  type: TransactionType;
+}
+
+export interface BackendBudgetSummaryItem {
+  categoryName: string;
+  limit: number;
+  spent: number;
+  isNearingLimit: boolean;
+}
+
+export interface BackendCategorizeResponse {
+  category: string;
+}
+
+export interface BackendAskResponse {
+  answer: string;
+}
+
+// -------------------------------------------------------------
+// Paystack Transfer Sandbox Types (Demo Mode only)
 // -------------------------------------------------------------
 export interface PaystackBank {
   name: string;
@@ -122,9 +161,9 @@ export interface PaystackTransferPayload {
   recipientBankName: string;
   accountNumber: string;
   accountName: string;
-  amount: number; // in NGN or local units
+  amount: number;
   narration?: string;
-  category?: string; // option to automatically record in Yawa Budget
+  category?: string;
   recordInLedger?: boolean;
 }
 

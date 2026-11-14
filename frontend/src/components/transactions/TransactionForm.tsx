@@ -1,10 +1,15 @@
 import React, { useState, useRef } from "react";
-import { Plus, Mic, Calendar, Tag, FileText, Check, HelpCircle } from "lucide-react";
+import { Plus, Mic, Calendar, Tag, FileText, HelpCircle, ArrowLeftRight } from "lucide-react";
 import { Input } from "../common/Input";
 import { Button } from "../common/Button";
 import { ErrorAlert } from "../common/ErrorAlert";
-import { categorizeTransactionApi, getErrorMessage, updateTransactionCategoryApi } from "../../api";
-import { CreateTransactionPayload, Transaction } from "../../types";
+import {
+  categorizeTransactionApi,
+  getErrorMessage,
+  updateTransactionCategoryApi,
+  IS_DEMO_MODE,
+} from "../../api";
+import { CreateTransactionPayload, Transaction, TransactionType } from "../../types";
 
 interface TransactionFormProps {
   categories: string[];
@@ -23,11 +28,12 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   const [description, setDescription] = useState<string>("");
   const [date, setDate] = useState<string>(todayStr);
   const [category, setCategory] = useState<string>("");
+  const [type, setType] = useState<TransactionType>("EXPENSE");
 
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  // Saved notification tag: "Sorted as [Category]" which user can tap to change
+  // Saved notification tag: "Sorted as [Category]"
   const [lastSaved, setLastSaved] = useState<{
     id?: string;
     category: string;
@@ -40,12 +46,10 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
   const [isListeningSentence, setIsListeningSentence] = useState<boolean>(false);
   const recognitionRef = useRef<any>(null);
 
-  // Helper to parse sentences like "jollof 2500" or "bolt to campus 4200" or "2500 jollof"
   const parseSentenceInput = (text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    // Pattern 1: Number at the end e.g. "jollof 2500" or "bolt to campus ₦4,200"
     const endNumberMatch = trimmed.match(/^(.*?)(?:\s+(?:for\s+)?(?:₦\s*)?(\d+(?:,\d{3})*(?:\.\d{1,2})?))\s*$/i);
     if (endNumberMatch && endNumberMatch[1] && endNumberMatch[2]) {
       const cleanDesc = endNumberMatch[1].trim();
@@ -57,7 +61,6 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       }
     }
 
-    // Pattern 2: Number at the start e.g. "2500 jollof" or "₦4200 bolt"
     const startNumberMatch = trimmed.match(/^(?:₦\s*)?(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s+(?:for\s+)?(.*?)$/i);
     if (startNumberMatch && startNumberMatch[1] && startNumberMatch[2]) {
       const cleanAmt = startNumberMatch[1].replace(/,/g, "");
@@ -69,12 +72,10 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
       }
     }
 
-    // Default: just set description
     setDescription(trimmed);
   };
 
   const handleDescriptionChange = (val: string) => {
-    // If user types or pastes something like "jollof 2500", parse it
     if (/\d+/.test(val) && !amount) {
       parseSentenceInput(val);
     } else {
@@ -167,18 +168,19 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     setIsSubmitting(true);
 
     try {
-      let finalCategory = category.trim();
+      let finalCategory: string | undefined = category.trim() || undefined;
 
-      // If category was left blank, determine it automatically
-      if (!finalCategory) {
+      // If category was left blank, determine it automatically via /ai/categorize
+      if (!finalCategory && type === "EXPENSE") {
         try {
           const autoRes = await categorizeTransactionApi({
             description: description.trim(),
             amount: numAmount,
           });
-          finalCategory = autoRes.suggestedCategory || "Other";
+          finalCategory = autoRes.suggestedCategory || undefined;
         } catch {
-          finalCategory = "Other";
+          // Leave undefined so backend can categorize or default cleanly
+          finalCategory = undefined;
         }
       }
 
@@ -187,20 +189,23 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
         description: description.trim(),
         date,
         category: finalCategory,
+        type,
       });
 
-      // Show plain confirmation tag "Sorted as [Category]" which user can tap to change
+      const resolvedCategory =
+        (createdTx as Transaction | undefined)?.category || finalCategory || "Other";
+
       setLastSaved({
         id: (createdTx as Transaction | undefined)?.id,
-        category: finalCategory,
+        category: resolvedCategory,
         description: description.trim(),
       });
 
-      // Clear input fields
       setAmount("");
       setDescription("");
       setDate(todayStr);
       setCategory("");
+      setType("EXPENSE");
     } catch (err) {
       setFormError(getErrorMessage(err, "Failed to record transaction. Please try again."));
     } finally {
@@ -212,7 +217,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
     if (!lastSaved) return;
     setIsUpdatingCategory(true);
     try {
-      if (lastSaved.id) {
+      if (lastSaved.id && IS_DEMO_MODE) {
         await updateTransactionCategoryApi(lastSaved.id, newCategory);
         if (onUpdateCategory) {
           await onUpdateCategory(lastSaved.id, newCategory);
@@ -258,7 +263,7 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
 
       {formError && <ErrorAlert message={formError} className="mb-4" />}
 
-      {/* Confirmation tag: "Sorted as [Category]" which user can tap to change */}
+      {/* Confirmation tag: "Sorted as [Category]" */}
       {lastSaved && (
         <div
           id="sorted-category-tag"
@@ -274,42 +279,43 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
             </span>
           </div>
 
-          {!isChangingCategory ? (
-            <button
-              type="button"
-              onClick={() => setIsChangingCategory(true)}
-              className="text-xs font-sans text-[var(--text-secondary)] hover:text-[var(--text-primary)] underline cursor-pointer"
-            >
-              Change
-            </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <select
-                defaultValue={lastSaved.category}
-                onChange={(e) => handleChangeCategoryConfirm(e.target.value)}
-                disabled={isUpdatingCategory}
-                className="text-xs font-sans border border-[var(--border-color)] bg-[var(--bg-surface)] px-2 py-1 text-[var(--text-primary)] rounded-xs focus:outline-none"
-              >
-                {categories.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+          {IS_DEMO_MODE &&
+            (!isChangingCategory ? (
               <button
                 type="button"
-                onClick={() => setIsChangingCategory(false)}
-                className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                onClick={() => setIsChangingCategory(true)}
+                className="text-xs font-sans text-[var(--text-secondary)] hover:text-[var(--text-primary)] underline cursor-pointer"
               >
-                Cancel
+                Change
               </button>
-            </div>
-          )}
+            ) : (
+              <div className="flex items-center gap-2">
+                <select
+                  defaultValue={lastSaved.category}
+                  onChange={(e) => handleChangeCategoryConfirm(e.target.value)}
+                  disabled={isUpdatingCategory}
+                  className="text-xs font-sans border border-[var(--border-color)] bg-[var(--bg-surface)] px-2 py-1 text-[var(--text-primary)] rounded-xs focus:outline-none"
+                >
+                  {categories.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setIsChangingCategory(false)}
+                  className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                >
+                  Cancel
+                </button>
+              </div>
+            ))}
         </div>
       )}
 
       <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           {/* Description with voice sentence button */}
           <div className="relative">
             <Input
@@ -350,6 +356,30 @@ export const TransactionForm: React.FC<TransactionFormProps> = ({
             className="tabular-nums font-mono"
             required
           />
+
+          {/* Type (EXPENSE / INCOME) */}
+          <div>
+            <label
+              htmlFor="tx-type-select"
+              className="block text-xs font-sans text-[var(--text-secondary)] mb-1"
+            >
+              Type
+            </label>
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-[var(--text-muted)]">
+                <ArrowLeftRight className="w-3.5 h-3.5" />
+              </div>
+              <select
+                id="tx-type-select"
+                value={type}
+                onChange={(e) => setType(e.target.value as TransactionType)}
+                className="w-full rounded-sm border border-[var(--border-color)] bg-[var(--bg-surface)] pl-9 pr-3 py-1.5 text-sm text-[var(--text-primary)] transition-colors focus:outline-none focus:border-[var(--text-primary)]"
+              >
+                <option value="EXPENSE">Expense</option>
+                <option value="INCOME">Income</option>
+              </select>
+            </div>
+          </div>
 
           {/* Date */}
           <Input

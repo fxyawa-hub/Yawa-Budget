@@ -1,18 +1,24 @@
 import React, { useState } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
-import { Lock, Mail, AlertCircle, Sun, Moon } from "lucide-react";
+import { Lock, Mail, AlertCircle, Sun, Moon, Loader2 } from "lucide-react";
 import { Input } from "../components/common/Input";
 import { Button } from "../components/common/Button";
 import { ErrorAlert } from "../components/common/ErrorAlert";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
-import { getErrorMessage } from "../api";
+import {
+  getErrorMessage,
+  IS_DEMO_MODE,
+  useServerWakeStatus,
+  SERVER_WAKING_MESSAGE,
+} from "../api";
 
 export const LoginPage: React.FC = () => {
   const { login } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
+  const isWaking = useServerWakeStatus();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -82,6 +88,16 @@ export const LoginPage: React.FC = () => {
 
           {error && <ErrorAlert message={error} className="mb-4" />}
 
+          {isLoading && isWaking && (
+            <div
+              className="mb-4 p-3 border border-[var(--border-color)] bg-[var(--bg-base)] text-xs font-mono text-[var(--text-secondary)] flex items-center gap-2"
+              role="status"
+            >
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+              <span>{SERVER_WAKING_MESSAGE}</span>
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-4">
             <Input
               id="login-email-input"
@@ -120,18 +136,20 @@ export const LoginPage: React.FC = () => {
             </div>
           </form>
 
-          <div className="mt-6 pt-5 border-t border-[var(--border-color)]">
-            <Button
-              id="fill-demo-credentials-btn"
-              type="button"
-              variant="outline"
-              size="sm"
-              className="w-full font-mono text-xs"
-              onClick={handleFillDemo}
-            >
-              Fill demo credentials
-            </Button>
-          </div>
+          {IS_DEMO_MODE && (
+            <div className="mt-6 pt-5 border-t border-[var(--border-color)]">
+              <Button
+                id="fill-demo-credentials-btn"
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full font-mono text-xs"
+                onClick={handleFillDemo}
+              >
+                Fill demo credentials
+              </Button>
+            </div>
+          )}
         </div>
 
         <div className="mt-6 text-center text-xs font-sans text-[var(--text-secondary)]">

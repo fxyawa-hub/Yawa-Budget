@@ -40,7 +40,7 @@ export const TransactionList: React.FC<TransactionListProps> = ({
       <div className="border border-[var(--border-color)] bg-[var(--bg-surface)] p-4">
         <EmptyState
           title="No transactions recorded"
-          description="You have not added any expenses yet. Record a manual entry above to get started."
+          description="You have not added any transactions yet. Record a manual entry above to get started."
           icon={<Receipt className="w-4 h-4" />}
         />
       </div>
@@ -65,36 +65,51 @@ export const TransactionList: React.FC<TransactionListProps> = ({
 
       {/* Stacked rows, never horizontally scrolling */}
       <div className="divide-y divide-[var(--border-color)]">
-        {transactions.map((tx) => (
-          <div
-            key={tx.id}
-            id={`transaction-row-${tx.id}`}
-            className="px-5 py-3 flex items-start sm:items-center justify-between gap-3 hover:bg-[var(--bg-subtle)] transition-colors"
-          >
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-sans font-medium text-[var(--text-primary)] truncate">
-                {tx.description}
-              </p>
+        {transactions.map((tx) => {
+          const isIncome = tx.type === "INCOME";
+          return (
+            <div
+              key={tx.id}
+              id={`transaction-row-${tx.id}`}
+              className="px-5 py-3 flex items-start sm:items-center justify-between gap-3 hover:bg-[var(--bg-subtle)] transition-colors"
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-sans font-medium text-[var(--text-primary)] truncate">
+                  {tx.description}
+                </p>
 
-              <div className="flex flex-wrap items-center gap-2 mt-1">
-                <span className="font-mono text-[11px] text-[var(--text-secondary)] flex items-center gap-1">
-                  <Calendar className="w-3 h-3 text-[var(--text-muted)]" />
-                  {tx.date}
+                <div className="flex flex-wrap items-center gap-2 mt-1">
+                  <span className="font-mono text-[11px] text-[var(--text-secondary)] flex items-center gap-1">
+                    <Calendar className="w-3 h-3 text-[var(--text-muted)]" />
+                    {tx.date}
+                  </span>
+
+                  <Badge variant="neutral" size="sm">
+                    {tx.category}
+                  </Badge>
+
+                  {isIncome && (
+                    <Badge variant="success" size="sm">
+                      Income
+                    </Badge>
+                  )}
+                </div>
+              </div>
+
+              <div className="text-right shrink-0 pt-0.5 sm:pt-0">
+                <span
+                  className={`font-mono text-sm sm:text-base font-semibold tabular-nums ${
+                    isIncome
+                      ? "text-[var(--accent-lime-text)] dark:text-[var(--accent-lime)]"
+                      : "text-[var(--text-primary)]"
+                  }`}
+                >
+                  {isIncome ? "+" : ""}₦{tx.amount.toLocaleString()}
                 </span>
-
-                <Badge variant="neutral" size="sm">
-                  {tx.category}
-                </Badge>
               </div>
             </div>
-
-            <div className="text-right shrink-0 pt-0.5 sm:pt-0">
-              <span className="font-mono text-sm sm:text-base font-semibold tabular-nums text-[var(--text-primary)]">
-                ₦{tx.amount.toLocaleString()}
-              </span>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

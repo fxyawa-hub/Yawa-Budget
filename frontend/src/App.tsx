@@ -12,6 +12,7 @@ import { BudgetsPage } from "./pages/BudgetsPage";
 import { TransfersPage } from "./pages/TransfersPage";
 import { AskYawaBudgetPage } from "./pages/AskYawaBudgetPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { IS_DEMO_MODE } from "./api";
 
 // Root redirector component based on authentication state
 const RootRedirect: React.FC = () => {
@@ -68,16 +69,18 @@ export default function App() {
               }
             />
 
-            <Route
-              path="/transfers"
-              element={
-                <ProtectedRoute>
-                  <AppLayout>
-                    <TransfersPage />
-                  </AppLayout>
-                </ProtectedRoute>
-              }
-            />
+            {IS_DEMO_MODE && (
+              <Route
+                path="/transfers"
+                element={
+                  <ProtectedRoute>
+                    <AppLayout>
+                      <TransfersPage />
+                    </AppLayout>
+                  </ProtectedRoute>
+                }
+              />
+            )}
 
             <Route
               path="/ask"

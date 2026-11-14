@@ -8,7 +8,6 @@ import { ErrorAlert } from "../components/common/ErrorAlert";
 import { EmptyState } from "../components/common/EmptyState";
 import { DashboardHero } from "../components/dashboard/DashboardHero";
 import { BudgetProgressList } from "../components/dashboard/BudgetProgressList";
-import { SpendingChart } from "../components/dashboard/SpendingChart";
 
 const HIDE_BALANCES_KEY = "yawabudget_hide_balances";
 
@@ -226,19 +225,6 @@ export const DashboardPage: React.FC = () => {
 
             {/* Thin full-width horizontal bars */}
             <BudgetProgressList categories={summary.categories} hideBalances={hideBalances} />
-          </div>
-
-          {/* Comparative category chart */}
-          <div className="border border-[var(--border-color)] bg-[var(--bg-surface)] p-5 sm:p-6">
-            <div className="pb-3 mb-2 border-b border-[var(--border-color)]">
-              <h3 className="text-sm font-semibold text-[var(--text-primary)]">
-                Expenditure comparison
-              </h3>
-              <p className="text-xs font-mono text-[var(--text-muted)] mt-0.5">
-                Recorded spending versus allocated limits
-              </p>
-            </div>
-            <SpendingChart categories={summary.categories} hideBalances={hideBalances} />
           </div>
         </>
       )}

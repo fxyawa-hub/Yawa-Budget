@@ -18,9 +18,10 @@ export const SettingsPage: React.FC = () => {
     try {
       const transactions = await getTransactionsApi();
 
-      const headers = ["Date", "Description", "Category", "Amount (NGN)"];
+      const headers = ["Date", "Type", "Description", "Category", "Amount (NGN)"];
       const rows = transactions.map((t) => [
         `"${t.date}"`,
+        `"${t.type || "EXPENSE"}"`,
         `"${t.description.replace(/"/g, '""')}"`,
         `"${t.category.replace(/"/g, '""')}"`,
         t.amount.toString(),

@@ -1,17 +1,18 @@
 import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Lock, Mail, User, Sun, Moon } from "lucide-react";
+import { Lock, Mail, User, Sun, Moon, Loader2 } from "lucide-react";
 import { Input } from "../components/common/Input";
 import { Button } from "../components/common/Button";
 import { ErrorAlert } from "../components/common/ErrorAlert";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
-import { getErrorMessage } from "../api";
+import { getErrorMessage, useServerWakeStatus, SERVER_WAKING_MESSAGE } from "../api";
 
 export const RegisterPage: React.FC = () => {
   const { register } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
+  const isWaking = useServerWakeStatus();
 
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -24,13 +25,13 @@ export const RegisterPage: React.FC = () => {
     e.preventDefault();
     setError(null);
 
-    if (!email.trim() || !password) {
+    if (!name.trim() || !email.trim() || !password) {
       setError("Please fill in all required fields.");
       return;
     }
 
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters long.");
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters long.");
       return;
     }
 
@@ -44,7 +45,7 @@ export const RegisterPage: React.FC = () => {
       await register({
         email: email.trim(),
         password,
-        name: name.trim() || undefined,
+        name: name.trim(),
       });
       navigate("/dashboard", { replace: true });
     } catch (err) {
@@ -81,15 +82,26 @@ export const RegisterPage: React.FC = () => {
         <div className="border border-[var(--border-color)] bg-[var(--bg-surface)] p-6 sm:p-8">
           {error && <ErrorAlert message={error} className="mb-4" />}
 
+          {isLoading && isWaking && (
+            <div
+              className="mb-4 p-3 border border-[var(--border-color)] bg-[var(--bg-base)] text-xs font-mono text-[var(--text-secondary)] flex items-center gap-2"
+              role="status"
+            >
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+              <span>{SERVER_WAKING_MESSAGE}</span>
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-4">
             <Input
               id="register-name-input"
-              label="Full name (optional)"
+              label="Full name"
               type="text"
-              placeholder="e.g. Alex Morgan"
+              placeholder="e.g. Tunde Adeyemi"
               value={name}
               onChange={(e) => setName(e.target.value)}
               leftIcon={<User className="w-3.5 h-3.5" />}
+              required
             />
 
             <Input
@@ -106,7 +118,7 @@ export const RegisterPage: React.FC = () => {
 
             <Input
               id="register-password-input"
-              label="Password (min 6 characters)"
+              label="Password (min 8 characters)"
               type="password"
               placeholder="••••••••"
               value={password}

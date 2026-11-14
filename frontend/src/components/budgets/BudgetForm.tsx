@@ -4,6 +4,7 @@ import { Input } from "../common/Input";
 import { Button } from "../common/Button";
 import { ErrorAlert } from "../common/ErrorAlert";
 import { SetBudgetPayload } from "../../types";
+import { getErrorMessage, IS_DEMO_MODE } from "../../api";
 
 interface BudgetFormProps {
   categories: string[];
@@ -11,7 +12,7 @@ interface BudgetFormProps {
 }
 
 export const BudgetForm: React.FC<BudgetFormProps> = ({ categories, onSubmitBudget }) => {
-  const [category, setCategory] = useState<string>(categories[0] || "Groceries");
+  const [category, setCategory] = useState<string>(categories[0] || "Food");
   const [customCategory, setCustomCategory] = useState<string>("");
   const [isCustom, setIsCustom] = useState<boolean>(false);
   const [monthlyLimit, setMonthlyLimit] = useState<string>("");
@@ -33,8 +34,8 @@ export const BudgetForm: React.FC<BudgetFormProps> = ({ categories, onSubmitBudg
     }
 
     const limit = parseFloat(monthlyLimit.replace(/,/g, ""));
-    if (isNaN(limit) || limit < 0) {
-      setError("Please enter a valid monthly limit (0 or greater).");
+    if (isNaN(limit) || limit <= 0) {
+      setError("Please enter a monthly limit greater than 0.");
       return;
     }
 
@@ -51,8 +52,8 @@ export const BudgetForm: React.FC<BudgetFormProps> = ({ categories, onSubmitBudg
         setCustomCategory("");
         setIsCustom(false);
       }
-    } catch {
-      setError("Failed to save budget limit. Please try again.");
+    } catch (err) {
+      setError(getErrorMessage(err, "Failed to save budget limit. Please try again."));
     } finally {
       setIsSubmitting(false);
     }
@@ -106,7 +107,7 @@ export const BudgetForm: React.FC<BudgetFormProps> = ({ categories, onSubmitBudg
                       {cat}
                     </option>
                   ))}
-                  <option value="__custom__">+ Custom category...</option>
+                  {IS_DEMO_MODE && <option value="__custom__">+ Custom category...</option>}
                 </select>
               </div>
             ) : (
@@ -136,7 +137,7 @@ export const BudgetForm: React.FC<BudgetFormProps> = ({ categories, onSubmitBudg
             label="Monthly limit (₦)"
             type="number"
             step="100"
-            min="0"
+            min="1"
             placeholder="e.g. 50000"
             value={monthlyLimit}
             onChange={(e) => setMonthlyLimit(e.target.value)}

@@ -1,10 +1,16 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { getBudgetsApi, setBudgetApi, getErrorMessage } from "../api";
+import {
+  getBudgetsApi,
+  setBudgetApi,
+  getErrorMessage,
+  IS_DEMO_MODE,
+  BACKEND_CATEGORIES,
+} from "../api";
 import { Budget, SetBudgetPayload } from "../types";
 import { BudgetForm } from "../components/budgets/BudgetForm";
 import { BudgetList } from "../components/budgets/BudgetList";
 
-const STANDARD_CATEGORIES = [
+const DEMO_CATEGORIES = [
   "Groceries",
   "Dining Out",
   "Housing & Rent",
@@ -52,9 +58,9 @@ export const BudgetsPage: React.FC = () => {
     });
   };
 
-  // Compile categories list
+  const baseCategories = IS_DEMO_MODE ? DEMO_CATEGORIES : BACKEND_CATEGORIES;
   const existingCategoryNames = budgets.map((b) => b.category);
-  const allCategories = Array.from(new Set([...STANDARD_CATEGORIES, ...existingCategoryNames]));
+  const allCategories = Array.from(new Set([...baseCategories, ...existingCategoryNames]));
 
   return (
     <div className="space-y-8">
